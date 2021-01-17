@@ -57,6 +57,8 @@ return view.extend({
 
 		o = s.option(form.Flag, 'drop_invalid', _('Drop invalid packets'));
 
+		o = s.option(form.Flag, 'fullcone', _('Full Cone'));
+
 		var p = [
 			s.option(form.ListValue, 'input', _('Input')),
 			s.option(form.ListValue, 'output', _('Output')),
