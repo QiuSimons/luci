@@ -57,6 +57,11 @@ return view.extend({
 
 		o = s.option(form.Flag, 'drop_invalid', _('Drop invalid packets'));
 
+		o = s:option(ListValue, "fullcone", translate("Enable FullCone NAT"))
+		o:value("0", translate("Disable"))
+		o:value("1", translate("Compatible Mode"))
+		o:value("2", translate("High Performing Mode"))
+
 		var p = [
 			s.option(form.ListValue, 'input', _('Input')),
 			s.option(form.ListValue, 'output', _('Output')),
