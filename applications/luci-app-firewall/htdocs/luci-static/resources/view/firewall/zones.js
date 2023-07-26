@@ -7,6 +7,58 @@
 'require firewall';
 'require tools.firewall as fwtool';
 'require tools.widgets as widgets';
+var callInitList, callInitAction, sfe;
+
+callInitList = rpc.declare({
+    object: 'luci',
+    method: 'getInitList',
+    params: ['name'],
+    expect: {
+        '': {}
+    },
+    filter: function (res) {
+        for (var k in res)
+            return +res[k].enabled;
+        return null;
+    }
+});
+callInitAction = rpc.declare({
+    object: 'luci',
+    method: 'setInitAction',
+    params: ['name', 'action'],
+    expect: {
+        result: false
+    }
+});
+sfe = form.DummyValue.extend({
+    renderWidget: function (section_id, option_id, cfgvalue) {
+        return E([], [this.sfe_support ? E('button', {
+            'class': 'cbi-button cbi-button-save',
+            'click': function () {
+                this.disabled = true;
+                this.blur();
+                this.classList.add('spinning');
+                callInitAction('shortcut-fe', 'stop');
+                callInitAction('shortcut-fe', 'disable').then(L.bind(function () {
+                    this.classList.remove('spinning');
+                    location.reload();
+                }, this));
+            }
+        }, _('Enabled')) : E('button', {
+            'class': 'cbi-button cbi-button-reset',
+            'click': function () {
+                this.disabled = true;
+                this.blur();
+                this.classList.add('spinning');
+                callInitAction('shortcut-fe', 'start');
+                callInitAction('shortcut-fe', 'enable').then(L.bind(function () {
+                    this.classList.remove('spinning');
+                    location.reload();
+                }, this));
+            }
+        }, _('Disabled'))]);
+    },
+});
 
 return view.extend({
 	callConntrackHelpers: rpc.declare({
@@ -18,7 +70,8 @@ return view.extend({
 	load: function() {
 		return Promise.all([
 			this.callConntrackHelpers(),
-			firewall.getDefaults()
+			firewall.getDefaults(),
+			callInitList('shortcut-fe')
 		]);
 	},
 
@@ -32,6 +85,7 @@ return view.extend({
 	renderZones: function(data) {
 		var ctHelpers = data[0],
 		    fwDefaults = data[1],
+			sfe_support = data[2],
 		    m, s, o, inp, out;
 		var fw4 = L.hasSystemFeature('firewall4');
 
@@ -78,7 +132,13 @@ return view.extend({
 
 			s.anonymous = true;
 			s.addremove = false;
-
+			
+	        o = s.option(sfe, _('SFE flow offloading'),
+				_('SFE flow offloading'), _('SFE based offloading for Routing/NAT. Restart recommended.'));
+			o.sfe_support = sfe_support;
+			o.load = function (section_id) {
+				return (uci.get('system', 'shortcut-fe', 'enabled') != 0) ? '1' : '0';
+			};
 			o = s.option(form.Flag, 'flow_offloading',
 				_('Software flow offloading'),
 				_('Software based offloading for routing/NAT'));
