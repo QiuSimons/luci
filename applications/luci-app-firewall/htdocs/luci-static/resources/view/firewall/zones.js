@@ -91,6 +91,15 @@ return view.extend({
 			o.depends('flow_offloading', '1');
 		}
 
+		/* Shortcut-FE flow offload support */
+		if (L.hasSystemFeature('shortcutfe')) {
+			o = s.option(form.Flag, 'shortcut_fe',
+			_('Shortcut-FE flow offloading'),
+			_('Shortcut-FE based offloading for routing/NAT'));
+			o.optional = true;
+			o.depends('flow_offloading', '0');
+		}
+
 
 		s = m.section(form.GridSection, 'zone', _('Zones'));
 		s.addremove = true;
