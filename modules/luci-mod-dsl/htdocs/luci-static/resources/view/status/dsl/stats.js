@@ -4,7 +4,7 @@
 'require poll';
 'require rpc';
 
-var callDSLMetrics = rpc.declare({
+const callDSLMetrics = rpc.declare({
 	object: 'dsl',
 	method: 'metrics',
 	expect: { '': {} }
@@ -19,11 +19,11 @@ function format_latency(val) {
 }
 
 return view.extend({
-	load: function() {
+	load() {
 		return L.resolveDefault(callDSLMetrics(), {});
 	},
 
-	pollData: function(container) {
+	pollData(container) {
 		poll.add(L.bind(function() {
 			return L.resolveDefault(callDSLMetrics(), {}).then(L.bind(function(data) {
 				dom.content(container, this.renderContent(data));
@@ -31,7 +31,7 @@ return view.extend({
 		}, this));
 	},
 
-	formatHelper: function(format, val) {
+	formatHelper(format, val) {
 		if (val != null) {
 			if (format instanceof Function) {
 				return format(val);
@@ -44,14 +44,14 @@ return view.extend({
 		return '-';
 	},
 
-	renderSimpleTable: function(data) {
-		var table = E('table', { 'class': 'table' });
+	renderSimpleTable(data) {
+		const table = E('table', { 'class': 'table' });
 
-		for (var [i, item] of data.entries()) {
-			var label = item[0];
-			var val = item[1];
+		for (let [i, item] of data.entries()) {
+			const label = item[0];
+			const val = item[1];
 
-			var rowstyle = (i % 2 == 0) ? 'cbi-rowstyle-1' : 'cbi-rowstyle-2';
+			const rowstyle = (i % 2 == 0) ? 'cbi-rowstyle-1' : 'cbi-rowstyle-2';
 
 			table.appendChild(E('tr', { 'class': 'tr ' + rowstyle }, [
 				E('td', { 'class': 'td left', 'width': '33%' }, [ label ]),
@@ -62,16 +62,16 @@ return view.extend({
 		return table;
 	},
 
-	renderTable: function(data) {
-		var table = E('table', { 'class': 'table' });
+	renderTable(data) {
+		const table = E('table', { 'class': 'table' });
 
-		for (var [i, item] of data.entries()) {
-			var label = item[0];
-			var format = item[1];
-			var val1 = item[2];
-			var val2 = item[3];
+		for (let [i, item] of data.entries()) {
+			const label = item[0];
+			const format = item[1];
+			const val1 = item[2];
+			const val2 = item[3];
 
-			var rowstyle = (i % 2 == 0) ? 'cbi-rowstyle-1' : 'cbi-rowstyle-2';
+			const rowstyle = (i % 2 == 0) ? 'cbi-rowstyle-1' : 'cbi-rowstyle-2';
 
 			table.appendChild(E('tr', { 'class': 'tr ' + rowstyle }, [
 				E('td', { 'class': 'td left', 'width': '33%' }, [ label ]),
@@ -83,9 +83,10 @@ return view.extend({
 		return table;
 	},
 
-	renderContent: function(data) {
+	renderContent(data) {
 		return E([], [
 
+			E('div', { 'class': 'cbi-section' }, [
 			E('h3', {}, [ _('Connection State') ]),
 
 			this.renderSimpleTable([
@@ -94,16 +95,18 @@ return view.extend({
 				[ _('Line Uptime'), '%t'.format(data.uptime) ],
 				[ _('Annex'), data.annex ],
 				[ _('Power Management Mode'), data.power_state ]
-			]),
+			]) ]),
 
+			E('div', { 'class': 'cbi-section' }, [
 			E('h3', {}, [ _('Inventory') ]),
 
 			this.renderSimpleTable([
 				[ _('Modem Chipset'), data.chipset ],
 				[ _('Modem Firmware'), data.firmware_version ],
 				[ _('xTU-C Vendor ID'), data.atu_c.vendor || data.atu_c.vendor_id ]
-			]),
+			]) ]),
 
+			E('div', { 'class': 'cbi-section' }, [
 			E('h3', {}, [ _('Line Details') ]),
 
 			E('h4', {}, [ _('Data Rates') ]),
@@ -132,8 +135,9 @@ return view.extend({
 				[ _('Signal Attenuation (SATN)'), '%.1f dB', data.downstream.satn, data.upstream.satn ],
 				[ _('Noise Margin (SNRM)'), '%.1f dB', data.downstream.snr, data.upstream.snr ],
 				[ _('Aggregate Transmit Power (ACTATP)'), '%.1f dB', data.downstream.actatp, data.upstream.actatp ]
-			]),
+			]) ]),
 
+			E('div', { 'class': 'cbi-section' }, [
 			E('h3', {}, [ _('Error Counters') ]),
 
 			E('h4', {}, [ _('Error Seconds') ]),
@@ -154,7 +158,7 @@ return view.extend({
 
 			E('h4', {}, [ _('Data Path Counters') ]),
 			this.renderTable([
-				[ _('ATM Header Error Code Errors (HEC-P)'), '%d', data.errors.near.hec, data.errors.far.hec ],
+				[ _('ATM Header Error Control Errors (HEC-P)'), '%d', data.errors.near.hec, data.errors.far.hec ],
 				[ _('PTM Non Pre-emptive CRC Errors (CRC-P)'), '%d', data.errors.near.crc_p, data.errors.far.crc_p ],
 				[ _('PTM Pre-emptive CRC Errors (CRCP-P)'), '%d', data.errors.near.crcp_p, data.errors.far.crcp_p ]
 			]),
@@ -164,18 +168,18 @@ return view.extend({
 				[ _('Retransmitted DTUs (rtx-tx)'), '%d', data.errors.far.tx_retransmitted, data.errors.near.tx_retransmitted ],
 				[ _('Corrected DTUs (rtx-c)'), '%d', data.errors.near.rx_corrected, data.errors.far.rx_corrected ],
 				[ _('Uncorrected DTUs (rtx-uc)'), '%d', data.errors.near.rx_uncorrected_protected, data.errors.far.rx_uncorrected_protected ]
-			])
+			]) ])
 
 		]);
 	},
 
-	render: function(data) {
-		var v = E([], [
+	render(data) {
+		const v = E([], [
 			E('h2', {}, [ _('DSL stats') ]),
 			E('div')
 		]);
 
-		var container = v.lastElementChild;
+		const container = v.lastElementChild;
 		dom.content(container, this.renderContent(data));
 		this.pollData(container);
 

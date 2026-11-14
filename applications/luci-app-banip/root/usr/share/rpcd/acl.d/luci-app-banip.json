@@ -2,49 +2,38 @@
 	"luci-app-banip": {
 		"description": "Grant access to LuCI app banIP",
 		"write": {
+			"cgi-io": [
+				"upload"
+			],
+			"ubus": {
+				"file": [
+					"write"
+				]
+			},
 			"uci": [
 				"banip"
 			],
 			"file": {
-				"/etc/banip/*": [
-					"read"
-				],
 				"/etc/banip/banip.allowlist": [
 					"write"
 				],
 				"/etc/banip/banip.blocklist": [
 					"write"
 				],
-				"/etc/banip/banip.feeds": [
+				"/etc/banip/banip.custom.feeds": [
 					"write"
-				]
-			}
-		},
-		"read": {
-			"cgi-io": [
-				"exec"
-			],
-			"file": {
-				"/var/run/banip.pid": [
-					"read"
 				],
-				"/var/run/banip_runtime.json": [
-					"read"
+				"/var/run/banIP/banIP.search": [
+					"write"
 				],
-				"/sbin/logread -e banIP-": [
-					"exec"
+				"/tmp/run/banIP/banIP.search": [
+					"write"
 				],
-				"/usr/sbin/logread -e banIP-": [
-					"exec"
+				"/var/run/banIP/banIP.report": [
+					"write"
 				],
-				"/sbin/logread -e  banIP/": [
-					"exec"
-				],
-				"/usr/sbin/logread -e  banIP/": [
-					"exec"
-				],
-				"/usr/sbin/nft -tj list ruleset": [
-					"exec"
+				"/tmp/run/banIP/banIP.report": [
+					"write"
 				],
 				"/etc/init.d/banip stop": [
 					"exec"
@@ -55,21 +44,68 @@
 				"/etc/init.d/banip restart": [
 					"exec"
 				],
-				"/etc/init.d/banip report json": [
+				"/etc/init.d/banip report gen": [
 					"exec"
 				],
 				"/etc/init.d/banip search *": [
 					"exec"
+				]
+			}
+		},
+		"read": {
+			"cgi-io": [
+				"download",
+				"exec"
+			],
+			"file": {
+				"/etc/banip/*": [
+					"read",
+					"list"
 				],
-				"/etc/init.d/banip survey *": [
+				"/var/run/banIP/banIP.runtime.json": [
+					"read",
+					"list"
+				],
+				"/tmp/run/banIP/banIP.runtime.json": [
+					"read",
+					"list"
+				],
+				"/var/run/banIP/banIP.search": [
+					"read"
+				],
+				"/tmp/run/banIP/banIP.search": [
+					"read"
+				],
+				"/var/run/banIP/banIP.report": [
+					"read"
+				],
+				"/tmp/run/banIP/banIP.report": [
+					"read"
+				],
+				"/usr/sbin/nft -tj list sets": [
 					"exec"
 				],
-				"/etc/init.d/banip status *": [
+				"/etc/init.d/banip actual": [
 					"exec"
+				],
+				"/etc/init.d/banip report json": [
+					"exec"
+				],
+				"/etc/init.d/banip content *": [
+					"exec"
+				]
+			},
+			"ubus": {
+				"file": [
+					"read",
+					"stat"
 				]
 			},
 			"uci": [
 				"banip"
+			],
+			"log": [
+				"read"
 			]
 		}
 	}

@@ -1,4 +1,5 @@
 'use strict';
+'require dom';
 'require view';
 'require poll';
 'require fs';
@@ -11,213 +12,419 @@
 	button handling
 */
 function handleAction(ev) {
-	fs.exec_direct('/etc/init.d/banip', [ev])
+	/* drop the rendered runtime marker to force a refresh */
+	const statusNode = document.getElementById('status');
+	if (statusNode) {
+		statusNode._banRuntime = null;
+	}
+	if (ev === 'restart' || ev === 'reload') {
+		let map = document.querySelector('.cbi-map');
+		return dom.callClassMethod(map, 'save')
+			.then(L.bind(ui.changes.apply, ui.changes))
+			.then(function () {
+				return fs.exec_direct('/etc/init.d/banip', [ev]);
+			})
+	} else {
+		return fs.exec_direct('/etc/init.d/banip', [ev]);
+	}
+}
+
+/*
+	runtime string helpers
+
+	f_genstatus() packs most runtime fields into display strings of the form
+	"key: value, key: value, ...". Split them up again so they can be rendered
+	as chips and key/value rows instead of one long line.
+*/
+function parsePairs(text) {
+	const pairs = [];
+	(text || '').split(', ').forEach(function (item) {
+		const idx = item.indexOf(': ');
+		if (idx > 0) {
+			pairs.push([item.substring(0, idx), item.substring(idx + 2)]);
+		} else if (item.trim()) {
+			pairs.push([null, item.trim()]);
+		}
+	});
+	return pairs;
+}
+
+function pickValue(pairs, key) {
+	for (let i = 0; i < pairs.length; i++) {
+		if (pairs[i][0] === key) {
+			return pairs[i][1];
+		}
+	}
+	return '-';
+}
+
+/*
+	expand grouped entries, e.g. "proto (4/6): ✔/✘" or
+	"limit (icmp/syn/udp): 10/10/10" into one entry per member
+*/
+function expandPairs(pairs) {
+	const result = [];
+	pairs.forEach(function (pair) {
+		if (!pair[0]) {
+			result.push(pair);
+			return;
+		}
+		const group = pair[0].match(/^(.*?)\s*\(([^()]*\/[^()]*)\)$/);
+		if (group) {
+			const names = group[2].split('/');
+			const values = pair[1].split('/');
+			if (names.length === values.length) {
+				for (let i = 0; i < names.length; i++) {
+					result.push([group[1] + ' ' + names[i], values[i]]);
+				}
+				return;
+			}
+		}
+		result.push(pair);
+	});
+	return result;
+}
+
+function flagChips(text) {
+	return expandPairs(parsePairs(text)).filter(function (pair) {
+		return pair[0];
+	}).sort(function (a, b) {
+		return a[0].localeCompare(b[0]);
+	}).map(function (flag) {
+		const on = flag[1] === '\u2714';
+		return E('span', { 'class': 'ban-chip ' + (on ? 'ban-chip-on' : 'ban-chip-off') }, [
+			E('span', { 'class': 'ban-mark' }, [on ? '\u2714' : '\u2718']),
+			flag[0]
+		]);
+	});
+}
+
+function feedChips(feeds) {
+	const chips = (Array.isArray(feeds) ? feeds : []).filter(function (feed) {
+		return feed && feed !== '-';
+	}).map(function (feed) {
+		return E('span', { 'class': 'ban-chip ban-chip-feed' }, [feed]);
+	});
+	return chips.length ? chips : ['-'];
+}
+
+/*
+	system_info is "cores: n, log: cmd, fetch: cmd, model, target, release".
+	Keep the named entries and the board model, drop target and release. The
+	model is the only unnamed entry, it gets the 'system' key for display.
+*/
+function sysPairs(text) {
+	let plain = 0;
+	return parsePairs(text).filter(function (pair) {
+		return pair[0] || ++plain === 1;
+	}).map(function (pair) {
+		return pair[0] ? pair : ['system', pair[1]];
+	});
+}
+
+/*
+	element_count is "<count> (chains: n, sets: n, rules: n)". The count itself
+	carries spaces as thousands separators, so it is cut at the parenthesis.
+*/
+function splitCount(text) {
+	const value = text || '';
+	const idx = value.indexOf(' (');
+	if (idx < 0) {
+		return { 'count': value || '-', 'detail': '-' };
+	}
+	return {
+		'count': value.substring(0, idx) || '-',
+		'detail': value.substring(idx + 2).replace(/\)$/, '') || '-'
+	};
+}
+
+/* active_uplink mixes both families, an IPv6 literal always carries a colon */
+function splitUplinks(list) {
+	const v4 = [], v6 = [];
+	(Array.isArray(list) ? list : []).forEach(function (addr) {
+		if (addr) {
+			(addr.indexOf(':') >= 0 ? v6 : v4).push(addr);
+		}
+	});
+	return {
+		'v4': v4.length ? v4.join(', ') : '-',
+		'v6': v6.length ? v6.join(', ') : '-'
+	};
+}
+
+/*
+	The container is a two column grid, so the nodes are emitted flat rather
+	than wrapped per row - that is what keeps the values aligned across rows.
+	Entries without a key span both columns. The trailing space in the key is
+	invisible but keeps the text copyable as "key value".
+*/
+function stackNodes(pairs, mono) {
+	const nodes = [];
+	pairs.forEach(function (pair) {
+		if (pair[0]) {
+			nodes.push(E('span', { 'class': 'ban-key' }, [pair[0], ' ']));
+			nodes.push(E('span', { 'class': mono ? 'ban-mono' : '' }, [pair[1]]));
+		} else {
+			nodes.push(E('span', { 'class': mono ? 'ban-full ban-mono' : 'ban-full' }, [pair[1]]));
+		}
+	});
+	return nodes.length ? nodes : ['-'];
 }
 
 return view.extend({
 	load: function () {
 		return Promise.all([
+			L.resolveDefault(fs.read_direct('/etc/banip/banip.custom.feeds'), ''),
 			L.resolveDefault(fs.read_direct('/etc/banip/banip.feeds'), ''),
 			L.resolveDefault(fs.read_direct('/etc/banip/banip.countries'), ''),
-			uci.load('banip')
+			uci.load('banip').catch(() => 0)
 		]);
 	},
 
 	render: function (result) {
-		var m, s, o;
+		/*
+			config check
+		*/
+		if (!result[3] || result[3].length === 0) {
+			ui.addNotification(null, E('p', _('No banIP config found!')), 'error');
+			return;
+		}
 
-		m = new form.Map('banip', 'banIP', _('Configuration of the banIP package to ban incoming and outgoing ip addresses/subnets via sets in nftables. \
-			For further information <a href="https://github.com/openwrt/packages/blob/master/net/banip/files/README.md" target="_blank" rel="noreferrer noopener" >check the online documentation</a>'));
+		let m, s, o;
+		m = new form.Map('banip', 'banIP', _('Configuration of the banIP package to ban incoming and outgoing IPs via named nftables Sets. \
+			For further information please check the %s.'.format(`<a style="color:#37c;font-weight:bold;" href="https://github.com/openwrt/packages/blob/master/net/banip/README.md" target="_blank" rel="noreferrer noopener" >${_('online documentation')}</a>`)));
+
+		/*
+			set text content helper function
+		*/
+		const setNodes = (id, nodes) => {
+			const el = document.getElementById(id);
+			if (el) {
+				dom.content(el, nodes);
+			}
+		};
+
+		const setText = (id, value) => {
+			const el = document.getElementById(id);
+			if (el) {
+				el.textContent = value || '-';
+			}
+		};
 
 		/*
 			poll runtime information
 		*/
-		var rt_res, inf_stat, inf_version, inf_elements, inf_feeds, inf_feedarray, inf_devices, inf_devicearray
-		var inf_subnets, inf_subnetarray, nft_infos, run_infos, inf_flags, last_run, inf_system
-
-		pollData: poll.add(function () {
-			return L.resolveDefault(fs.read_direct('/var/run/banip_runtime.json'), 'null').then(function (res) {
-				rt_res = JSON.parse(res);
-				inf_stat = document.getElementById('status');
-				if (inf_stat && rt_res) {
-					L.resolveDefault(fs.exec_direct('/etc/init.d/banip', ['status', 'update'])).then(function (update_res) {
-						inf_stat.textContent = (rt_res.status + ' (' + update_res.trim() + ')' || '-');
-					});
-					if (rt_res.status === "processing") {
-						if (!inf_stat.classList.contains("spinning")) {
-							inf_stat.classList.add("spinning");
+		let parseErrCount = 0;
+		poll.add(function () {
+			return Promise.all([
+				L.resolveDefault(fs.read_direct('/var/run/banIP/banIP.runtime.json'), null),
+				L.resolveDefault(fs.exec_direct('/etc/init.d/banip', ['actual']), '')
+			]).then(function (results) {
+				const res = results[0];
+				const actual = results[1]?.trim() || '';
+				const status = document.getElementById('status');
+				if (!res || (status && status._banRuntime === res + actual)) {
+					return;
+				}
+				const buttons = document.querySelectorAll('.cbi-page-actions button');
+				let info = null;
+				try {
+					info = JSON.parse(res);
+					parseErrCount = 0;
+				} catch (e) {
+					info = null;
+					parseErrCount++;
+					if (status) {
+						status.setAttribute('data-state', '');
+						setText('state', '-');
+						buttons.forEach(function (btn) {
+							btn.disabled = false;
+						});
+						status.classList.remove('spinning');
+						if (parseErrCount >= 3) {
+							ui.addNotification(null, E('p', _('Unable to parse the banIP runtime information!')), 'error');
+							poll.stop();
 						}
-					} else if (rt_res.status === "disabled") {
-						if (inf_stat.classList.contains("spinning")) {
-							inf_stat.classList.remove("spinning");
+					}
+					return;
+				}
+				if (status && info) {
+					const state = info.status || '-';
+					status.setAttribute('data-state', state);
+					setText('state', state);
+					setText('versions', `${info.frontend_ver || '-'} / ${info.backend_ver || '-'}`);
+					setNodes('actual', actual ? flagChips(actual) : ['-']);
+					if (info.status === "processing") {
+						buttons.forEach(function (btn) {
+							btn.disabled = true;
+							btn.blur();
+						});
+						if (!status.classList.contains("spinning")) {
+							status.classList.add("spinning");
 						}
-						poll.stop();
 					} else {
-						if (inf_stat.classList.contains("spinning")) {
-							inf_stat.classList.remove("spinning");
+						if (status.classList.contains("spinning")) {
+							status.classList.remove("spinning");
+							buttons.forEach(function (btn) {
+								btn.disabled = false;
+							});
 						}
 					}
-				} else if (inf_stat) {
-					inf_stat.textContent = '-';
-					if (inf_stat.classList.contains("spinning")) {
-						inf_stat.classList.remove("spinning");
-					}
 				}
-				inf_version = document.getElementById('version');
-				if (inf_version && rt_res) {
-					inf_version.textContent = rt_res.version || '-';
+				if (info) {
+					const elements = splitCount(info.element_count);
+					const runPairs = parsePairs(info.last_run);
+					const join = list => (Array.isArray(list) && list.length) ? list.join(', ') : '-';
+					setText('elements', elements.count);
+					setText('elements_sub', elements.detail);
+					setText('last', pickValue(runPairs, 'date / time'));
+					setText('last_sub', [pickValue(runPairs, 'mode'), pickValue(runPairs, 'duration'),
+					pickValue(runPairs, 'memory')].filter(v => v && v !== '-').join(', '));
+					setText('trigger', join(info.trigger_interfaces));
+					setText('wan_dev', join(info.wan_devices));
+					setText('wan_if', join(info.wan_interfaces));
+					setText('vlan_allow', join(info.vlan_allow));
+					setText('vlan_block', join(info.vlan_block));
+					const uplinks = splitUplinks(info.active_uplink);
+					setText('uplink4', uplinks.v4);
+					setText('uplink6', uplinks.v6);
+					setNodes('nft', stackNodes(expandPairs(parsePairs(info.nft_info)), false));
+					setNodes('sys', stackNodes(sysPairs(info.system_info), false));
+					setNodes('feeds', feedChips(info.active_feeds));
+					setNodes('flags', flagChips(info.run_flags));
+					setNodes('run', stackNodes(parsePairs(info.run_info), true));
 				}
-				inf_elements = document.getElementById('elements');
-				if (inf_elements && rt_res) {
-					inf_elements.textContent = rt_res.element_count || '-';
-				}
-				inf_feeds = document.getElementById('feeds');
-				inf_feedarray = [];
-				if (inf_feeds && rt_res) {
-					for (var i = 0; i < rt_res.active_feeds.length; i++) {
-						if (i < rt_res.active_feeds.length - 1) {
-							inf_feedarray += rt_res.active_feeds[i].feed + ', ';
-						} else {
-							inf_feedarray += rt_res.active_feeds[i].feed
-						}
-					}
-					inf_feeds.textContent = inf_feedarray || '-';
-				}
-				inf_devices = document.getElementById('devices');
-				inf_devicearray = [];
-				if (inf_devices && rt_res && rt_res.active_devices.length > 1) {
-					for (var i = 0; i < rt_res.active_devices.length; i++) {
-						if (i === 0 && rt_res.active_devices[i].device && rt_res.active_devices[i+1].interface) {
-							inf_devicearray += rt_res.active_devices[i].device + ' ::: ' + rt_res.active_devices[i+1].interface;
-							i++;
-						}
-						else if (i === 0) {
-							inf_devicearray += rt_res.active_devices[i].device
-						}
-						else if (i > 0 && rt_res.active_devices[i].device && rt_res.active_devices[i+1].interface) {
-							inf_devicearray += ', ' + rt_res.active_devices[i].device + ' ::: ' + rt_res.active_devices[i+1].interface;
-							i++;
-						}
-						else if (i > 0 && rt_res.active_devices[i].device) {
-							inf_devicearray += ', ' + rt_res.active_devices[i].device;
-						}
-						else if (i > 0 && rt_res.active_devices[i].interface) {
-							inf_devicearray += ', ' + rt_res.active_devices[i].interface;
-						}
-					}
-					inf_devices.textContent = inf_devicearray || '-';
-				}
-				inf_subnets = document.getElementById('subnets');
-				inf_subnetarray = [];
-				if (inf_subnets && rt_res) {
-					for (var i = 0; i < rt_res.active_subnets.length; i++) {
-						if (i < rt_res.active_subnets.length - 1) {
-							inf_subnetarray += rt_res.active_subnets[i].subnet + ', ';
-						} else {
-							inf_subnetarray += rt_res.active_subnets[i].subnet
-						}
-					}
-					inf_subnets.textContent = inf_subnetarray || '-';
-				}
-				nft_infos = document.getElementById('nft');
-				if (nft_infos && rt_res) {
-					nft_infos.textContent = rt_res.nft_info || '-';
-				}
-				run_infos = document.getElementById('run');
-				if (run_infos && rt_res) {
-					run_infos.textContent = rt_res.run_info || '-';
-				}
-				inf_flags = document.getElementById('flags');
-				if (inf_flags && rt_res) {
-					inf_flags.textContent = rt_res.run_flags || '-';
-				}
-				last_run = document.getElementById('last');
-				if (last_run && rt_res) {
-					last_run.textContent = rt_res.last_run || '-';
-				}
-				inf_system = document.getElementById('system');
-				if (inf_system && rt_res) {
-					inf_system.textContent = rt_res.system_info || '-';
+				/* only remember the content once it has been rendered */
+				if (status) {
+					status._banRuntime = res + actual;
 				}
 			});
-		}, 1);
+		}, 2);
 
 		/*
 			runtime information and buttons
 		*/
 		s = m.section(form.NamedSection, 'global');
-		s.render = L.bind(function (view, section_id) {
-			return E('div', { 'class': 'cbi-section' }, [
-				E('h3', _('Information')),
-				E('div', { 'class': 'cbi-value' }, [
-					E('label', { 'class': 'cbi-value-title', 'style': 'padding-top:0rem' }, _('Status')),
-					E('div', { 'class': 'cbi-value-field spinning', 'id': 'status', 'style': 'color:#37c' }, '\xa0')
+		s.render = function (view, section_id) {
+			/*
+				scoped theme palette
+
+				Neutral surfaces are derived from translucent grey so they work on
+				top of any LuCI theme background. Only the semantic colors are
+				switched per color scheme, and both variants are chosen to stay
+				readable either way.
+			*/
+			const style = E('style', { 'type': 'text/css' }, [
+				'#ban-status {' +
+				'--ban-card-bg: rgba(128,128,128,.07);' +
+				'--ban-card-border: rgba(128,128,128,.28);' +
+				'--ban-muted: GrayText;' +
+				'--ban-ok: #1f8a5f;' +
+				'--ban-err: #c0392b;' +
+				'--ban-info: #2f6fb0;' +
+				'--ban-ok-bg: rgba(31,138,95,.14);' +
+				'--ban-info-bg: rgba(47,111,176,.14);' +
+				'}' +
+				'@media (prefers-color-scheme: dark) {' +
+				'#ban-status {' +
+				'--ban-ok: #63c79b;' +
+				'--ban-err: #e8897e;' +
+				'--ban-info: #7fb3e8;' +
+				'}}' +
+				'#ban-status .ban-grid { display: grid; gap: .75em; grid-template-columns: repeat(auto-fit, minmax(min(12em, 100%), 1fr)); margin-bottom: .75em; }' +
+				'#ban-status .ban-card { background: var(--ban-card-bg); border: 1px solid var(--ban-card-border); border-radius: 8px; padding: .7em .9em; min-width: 0; overflow-wrap: break-word; }' +
+				'#ban-status .ban-block { margin-bottom: .75em; }' +
+				'#ban-status .ban-label { font-size: .85em; color: var(--ban-muted); margin-bottom: .3em; }' +
+				'#ban-status .ban-sub { font-size: .8em; color: var(--ban-muted); margin-top: .3em; }' +
+				'#ban-status .ban-value { font-size: 1.5em; line-height: 1.3; font-variant-numeric: tabular-nums; }' +
+				'#ban-status .ban-state { display: flex; align-items: center; gap: .5em; }' +
+				'#ban-status .ban-dot { width: .6em; height: .6em; border-radius: 50%; background: var(--ban-muted); flex: 0 0 auto; }' +
+				'#ban-status .ban-state[data-state="active"] .ban-dot { background: var(--ban-ok); }' +
+				'#ban-status .ban-state[data-state="processing"] .ban-dot { background: var(--ban-info); }' +
+				'#ban-status .ban-state[data-state="error"] .ban-dot { background: var(--ban-err); }' +
+				'#ban-status .ban-title { font-weight: bold; margin-bottom: .6em; }' +
+				'#ban-status .ban-chips { display: flex; flex-wrap: wrap; gap: .35em; }' +
+				'#ban-status .ban-chips-sm { margin-top: .4em; }' +
+				'#ban-status .ban-chip { font-size: .85em; padding: .15em .6em; border-radius: 6px; border: 1px solid transparent; }' +
+				'#ban-status .ban-chip-on { background: var(--ban-ok-bg); color: var(--ban-ok); }' +
+				'#ban-status .ban-chip-off { color: var(--ban-muted); border-color: var(--ban-card-border); }' +
+				'#ban-status .ban-chip-feed { background: var(--ban-info-bg); color: var(--ban-info); }' +
+				'#ban-status .ban-mark { margin-right: .35em; }' +
+				'#ban-status .ban-stack { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .25em .6em; font-size: .9em; }' +
+				'#ban-status .ban-stack .ban-full { grid-column: 1 / -1; }' +
+				'#ban-status .ban-key { color: var(--ban-muted); }' +
+				'#ban-status .ban-mono { font-family: monospace; word-break: break-all; }'
+			]);
+
+			/* static labels, only the value nodes are updated by the poll */
+			function kvRow(label, id) {
+				return [
+					E('span', { 'class': 'ban-key' }, [label, ' ']),
+					E('span', { 'id': id }, ['-'])
+				];
+			}
+
+			return E('div', { 'class': 'cbi-section', 'id': 'ban-status' }, [
+				style,
+				E('div', { 'class': 'ban-grid' }, [
+					E('div', { 'class': 'ban-card' }, [
+						E('div', { 'class': 'ban-label' }, [_('Status')]),
+						E('div', { 'class': 'ban-state spinning', 'id': 'status', 'data-state': '' }, [
+							E('span', { 'class': 'ban-dot' }),
+							E('span', { 'class': 'ban-value', 'id': 'state' }, ['-'])
+						]),
+						E('div', { 'class': 'ban-chips ban-chips-sm', 'id': 'actual' }, ['-']),
+						E('div', { 'class': 'ban-sub' }, [
+							_('Version'), ': ', E('span', { 'id': 'versions' }, ['-'])
+						])
+					]),
+					E('div', { 'class': 'ban-card' }, [
+						E('div', { 'class': 'ban-label' }, [_('Elements')]),
+						E('div', { 'class': 'ban-value', 'id': 'elements' }, ['-']),
+						E('div', { 'class': 'ban-sub', 'id': 'elements_sub' }, ['-'])
+					]),
+					E('div', { 'class': 'ban-card' }, [
+						E('div', { 'class': 'ban-label' }, [_('Last Run')]),
+						E('div', { 'class': 'ban-value', 'id': 'last' }, ['-']),
+						E('div', { 'class': 'ban-sub', 'id': 'last_sub' }, ['-'])
+					])
 				]),
-				E('div', { 'class': 'cbi-value' }, [
-					E('label', { 'class': 'cbi-value-title', 'style': 'padding-top:0rem' }, _('Version')),
-					E('div', { 'class': 'cbi-value-field', 'id': 'version', 'style': 'color:#37c' }, '-')
+				E('div', { 'class': 'ban-grid' }, [
+					E('div', { 'class': 'ban-card' }, [
+						E('div', { 'class': 'ban-title' }, [_('NFT Information')]),
+						E('div', { 'class': 'ban-stack', 'id': 'nft' }, ['-'])
+					]),
+					E('div', { 'class': 'ban-card' }, [
+						E('div', { 'class': 'ban-title' }, [_('Interfaces')]),
+						E('div', { 'class': 'ban-stack' }, [].concat(
+							kvRow('trigger', 'trigger'),
+							kvRow('wan-dev', 'wan_dev'),
+							kvRow('wan-if', 'wan_if'),
+							kvRow('vlan-allow', 'vlan_allow'),
+							kvRow('vlan-block', 'vlan_block'),
+							kvRow('uplink IPv4', 'uplink4'),
+							kvRow('uplink IPv6', 'uplink6')
+						))
+					]),
+					E('div', { 'class': 'ban-card' }, [
+						E('div', { 'class': 'ban-title' }, [_('System Info')]),
+						E('div', { 'class': 'ban-stack', 'id': 'sys' }, ['-'])
+					])
 				]),
-				E('div', { 'class': 'cbi-value' }, [
-					E('label', { 'class': 'cbi-value-title', 'style': 'padding-top:0rem' }, _('Element Count')),
-					E('div', { 'class': 'cbi-value-field', 'id': 'elements', 'style': 'color:#37c' }, '-')
+				E('div', { 'class': 'ban-card ban-block' }, [
+					E('div', { 'class': 'ban-title' }, [_('Active Feeds')]),
+					E('div', { 'class': 'ban-chips', 'id': 'feeds' }, ['-'])
 				]),
-				E('div', { 'class': 'cbi-value' }, [
-					E('label', { 'class': 'cbi-value-title', 'style': 'padding-top:0rem' }, _('Active Feeds')),
-					E('div', { 'class': 'cbi-value-field', 'id': 'feeds', 'style': 'color:#37c' }, '-')
+				E('div', { 'class': 'ban-card ban-block' }, [
+					E('div', { 'class': 'ban-title' }, [_('Run Flags')]),
+					E('div', { 'class': 'ban-chips', 'id': 'flags' }, ['-'])
 				]),
-				E('div', { 'class': 'cbi-value' }, [
-					E('label', { 'class': 'cbi-value-title', 'style': 'padding-top:0rem' }, _('Active Devices')),
-					E('div', { 'class': 'cbi-value-field', 'id': 'devices', 'style': 'color:#37c' }, '-')
-				]),
-				E('div', { 'class': 'cbi-value' }, [
-					E('label', { 'class': 'cbi-value-title', 'style': 'padding-top:0rem' }, _('Active Subnets')),
-					E('div', { 'class': 'cbi-value-field', 'id': 'subnets', 'style': 'color:#37c' }, '-')
-				]),
-				E('div', { 'class': 'cbi-value' }, [
-					E('label', { 'class': 'cbi-value-title', 'style': 'padding-top:0rem' }, _('NFT Information')),
-					E('div', { 'class': 'cbi-value-field', 'id': 'nft', 'style': 'color:#37c' }, '-')
-				]),
-				E('div', { 'class': 'cbi-value' }, [
-					E('label', { 'class': 'cbi-value-title', 'style': 'padding-top:0rem' }, _('Run Information')),
-					E('div', { 'class': 'cbi-value-field', 'id': 'run', 'style': 'color:#37c' }, '-')
-				]),
-				E('div', { 'class': 'cbi-value' }, [
-					E('label', { 'class': 'cbi-value-title', 'style': 'padding-top:0rem' }, _('Run Flags')),
-					E('div', { 'class': 'cbi-value-field', 'id': 'flags', 'style': 'color:#37c' }, '-')
-				]),
-				E('div', { 'class': 'cbi-value' }, [
-					E('label', { 'class': 'cbi-value-title', 'style': 'padding-top:0rem' }, _('Last Run')),
-					E('div', { 'class': 'cbi-value-field', 'id': 'last', 'style': 'color:#37c' }, '-')
-				]),
-				E('div', { 'class': 'cbi-value' }, [
-					E('label', { 'class': 'cbi-value-title', 'style': 'padding-top:0rem' }, _('System Information')),
-					E('div', { 'class': 'cbi-value-field', 'id': 'system', 'style': 'color:#37c' }, '-')
-				]),
-				E('div', { class: 'right' }, [
-					E('button', {
-						'class': 'btn cbi-button cbi-button-negative',
-						'click': ui.createHandlerFn(this, function () {
-							return handleAction('stop');
-						})
-					}, [_('Stop')]),
-					'\xa0\xa0\xa0',
-					E('button', {
-						'class': 'btn cbi-button cbi-button-positive',
-						'click': ui.createHandlerFn(this, function () {
-							return handleAction('reload');
-						})
-					}, [_('Reload')]),
-					'\xa0\xa0\xa0',
-					E('button', {
-						'class': 'btn cbi-button cbi-button-positive',
-						'click': ui.createHandlerFn(this, function () {
-							return handleAction('restart');
-						})
-					}, [_('Restart')])
+				E('div', { 'class': 'ban-card ban-block' }, [
+					E('div', { 'class': 'ban-title' }, [_('Run Information')]),
+					E('div', { 'class': 'ban-stack', 'id': 'run' }, ['-'])
 				])
 			]);
-		}, o, this);
-		this.pollData;
+		};
 
 		/*
 			tabbed config section
@@ -226,14 +433,20 @@ return view.extend({
 		s.addremove = false;
 		s.tab('general', _('General Settings'));
 		s.tab('advanced', _('Advanced Settings'));
-		s.tab('adv_chain', _('Chain/Set Settings'));
+		s.tab('adv_chain', _('Table/Chain Settings'));
+		s.tab('adv_set', _('Feed/Set Settings'));
 		s.tab('adv_log', _('Log Settings'));
 		s.tab('adv_email', _('E-Mail Settings'));
-		s.tab('feeds', _('Blocklist Feeds'));
+		s.tab('feeds', _('Feed Selection'));
 
 		/*
 			general settings tab
 		*/
+		o = s.taboption('general', form.DummyValue, '_sub');
+		o.rawhtml = true;
+		o.default = '<em style="color:#37c;font-weight:bold;">' + _('Changes on this tab needs a banIP service restart to take effect.') + '</em>'
+			+ '<hr style="width: 200px; height: 1px;" />';
+
 		o = s.taboption('general', form.Flag, 'ban_enabled', _('Enabled'), _('Enable the banIP service.'));
 		o.rmempty = false;
 
@@ -255,23 +468,20 @@ return view.extend({
 
 		o = s.taboption('general', widgets.DeviceSelect, 'ban_dev', _('Network Devices'), _('Select the WAN network device(s).'));
 		o.depends('ban_autodetect', '0');
-		o.unspecified = true;
 		o.multiple = true;
 		o.nocreate = true;
 		o.optional = true;
 		o.retain = true;
 
-		o = s.taboption('general', widgets.NetworkSelect, 'ban_ifv4', _('Network Interfaces'), _('Select the logical WAN IPv4 network interface(s).'));
+		o = s.taboption('general', widgets.NetworkSelect, 'ban_ifv4', _('IPv4 Network Interfaces'), _('Select the logical WAN IPv4 network interface(s).'));
 		o.depends('ban_autodetect', '0');
-		o.unspecified = true;
 		o.multiple = true;
 		o.nocreate = true;
 		o.optional = true;
 		o.retain = true;
 
-		o = s.taboption('general', widgets.NetworkSelect, 'ban_ifv6', _('Network Interfaces'), _('Select the logical WAN IPv6 network interface(s).'));
+		o = s.taboption('general', widgets.NetworkSelect, 'ban_ifv6', _('IPv6 Network Interfaces'), _('Select the logical WAN IPv6 network interface(s).'));
 		o.depends('ban_autodetect', '0');
-		o.unspecified = true;
 		o.multiple = true;
 		o.nocreate = true;
 		o.optional = true;
@@ -282,87 +492,96 @@ return view.extend({
 		o.value('uclient-fetch');
 		o.value('wget');
 		o.value('curl');
-		o.value('aria2c');
 		o.optional = true;
 		o.retain = true;
 
-		o = s.taboption('general', form.Value, 'ban_fetchparm', _('Download Parameters'), _('Override the pre-configured download options for the selected download utility.'))
+		o = s.taboption('general', form.Value, 'ban_fetchparm', _('Download Parameters'), _('Override the pre-configured download options for the selected download utility. The output flag, e.g. \'-o\' for curl or \'-O\' for wget, must be the last parameter.'));
 		o.depends('ban_autodetect', '0');
 		o.optional = true;
 		o.retain = true;
 
 		o = s.taboption('general', widgets.NetworkSelect, 'ban_trigger', _('Startup Trigger Interface'), _('List of available network interfaces to trigger the banIP start.'));
-		o.unspecified = true;
 		o.multiple = true;
 		o.nocreate = true;
 		o.rmempty = true;
 
-		o = s.taboption('general', form.Value, 'ban_triggerdelay', _('Trigger Delay'), _('Additional trigger delay in seconds before banIP processing actually starts.'));
+		o = s.taboption('general', form.Value, 'ban_triggerdelay', _('Trigger Delay'), _('Additional trigger delay in seconds before banIP processing begins.'));
 		o.placeholder = '10';
 		o.datatype = 'range(1,300)';
 		o.rmempty = true;
 
-		o = s.taboption('general', form.ListValue, 'ban_triggeraction', _('Trigger Action'), _('Trigger action on ifup interface events.'));
-		o.value('start', _('start (default)'));
-		o.value('reload', _('reload'));
-		o.value('restart', _('restart'));
+		o = s.taboption('general', form.ListValue, 'ban_fetchretry', _('Download Retries'), _('Number of download attempts in case of an error (not supported by uclient-fetch).'));
+		o.value('1');
+		o.value('3');
+		o.value('5');
+		o.value('10');
+		o.value('20');
+		o.default = '5';
+		o.placeholder = _('-- default --');
+		o.create = true;
 		o.optional = true;
 		o.rmempty = true;
 
-		o = s.taboption('general', form.Flag, 'ban_deduplicate', _('Deduplicate IPs'), _('Deduplicate IP addresses across all active sets and and tidy up the local blocklist.'));
-		o.default = 1
-		o.rmempty = false;
+		o = s.taboption('general', form.Flag, 'ban_fetchinsecure', _('Download Insecure'), _('Don\'t check SSL server certificates during download.'));
+		o.rmempty = true;
 
-		o = s.taboption('general', form.Flag, 'ban_loginput', _('Log WAN-Input'), _('Log suspicious incoming WAN packets (dropped).'));
-		o.default = 1
-		o.rmempty = false;
+		o = s.taboption('general', form.Flag, 'ban_nftcount', _('Reporting Counters'), _('Enable NFT counters for Set elements and chain rules. Required for the GeoIP Map and packet statistics in the Set Reporting.'));
+		o.rmempty = true;
 
-		o = s.taboption('general', form.Flag, 'ban_logforwardwan', _('Log WAN-Forward'), _('Log suspicious forwarded WAN packets (dropped).'));
-		o.default = 1
-		o.rmempty = false;
-
-		o = s.taboption('general', form.Flag, 'ban_logforwardlan', _('Log LAN-Forward'), _('Log suspicious forwarded LAN packets (rejected).'));
-		o.rmempty = false;
+		o = s.taboption('general', form.Flag, 'ban_map', _('Enable GeoIP Map'), _('Enable a GeoIP Map with suspicious Set elements. This requires external requests to load the Leaflet library and to fetch the geolocation data.'));
+		o.depends('ban_nftcount', '1');
+		o.optional = true;
+		o.rmempty = true;
 
 		/*
 			additional settings tab
 		*/
 		o = s.taboption('advanced', form.DummyValue, '_sub');
 		o.rawhtml = true;
-		o.default = '<em><b>' + _('Changes on this tab needs a banIP service restart to take effect.') + '</b></em>';
+		o.default = '<em style="color:#37c;font-weight:bold;">' + _('Changes on this tab needs a banIP service restart to take effect.') + '</em>'
+			+ '<hr style="width: 200px; height: 1px;" />';
 
 		o = s.taboption('advanced', form.ListValue, 'ban_nicelimit', _('Nice Level'), _('The selected priority will be used for banIP background processing.'));
 		o.value('-20', _('Highest Priority'));
 		o.value('-10', _('High Priority'));
-		o.value('0', _('Normal Priority (default)'));
+		o.value('0', _('Normal Priority'));
 		o.value('10', _('Less Priority'));
 		o.value('19', _('Least Priority'));
+		o.default = '0';
+		o.placeholder = _('-- default --');
+		o.create = true;
 		o.optional = true;
 		o.rmempty = true;
 
-		o = s.taboption('advanced', form.ListValue, 'ban_filelimit', _('Max Open Files'), _('Increase the maximal number of open files, e.g. to handle the amount of temporary split files while loading the sets.'));
-		o.value('512', _('512'));
-		o.value('1024', _('1024 (default)'));
-		o.value('2048', _('2048'));
-		o.value('4096', _('4096'));
+		o = s.taboption('advanced', form.ListValue, 'ban_filelimit', _('Max Open Files'), _('Increase the maximal number of open files, e.g. to handle the amount of temporary split files while loading the Sets.'));
+		o.value('512');
+		o.value('1024');
+		o.value('2048');
+		o.value('4096');
+		o.default = '1024';
+		o.placeholder = _('-- default --');
+		o.create = true;
 		o.optional = true;
 		o.rmempty = true;
 
-		o = s.taboption('advanced', form.ListValue, 'ban_cores', _('CPU Cores'), _('Limit the cpu cores used by banIP to save RAM.'));
+		o = s.taboption('advanced', form.ListValue, 'ban_cores', _('CPU Cores'), _('Limit the cpu cores used by banIP to save RAM, autodetected by default.'));
 		o.value('1');
 		o.value('2');
 		o.value('4');
 		o.value('8');
 		o.value('16');
+		o.placeholder = _('-- default --');
 		o.optional = true;
 		o.rmempty = true;
 
-		o = s.taboption('advanced', form.ListValue, 'ban_splitsize', _('Set Split Size'), _('Split external set loading after every n members to save RAM.'));
-		o.value('256');
+		o = s.taboption('advanced', form.ListValue, 'ban_splitsize', _('Set Split Size'), _('Split external Set loading after every n members to save RAM, disabled by default.'));
 		o.value('512');
 		o.value('1024');
 		o.value('2048');
 		o.value('4096');
+		o.value('8192');
+		o.value('16384');
+		o.placeholder = _('-- default --');
 		o.optional = true;
 		o.rmempty = true;
 
@@ -378,105 +597,242 @@ return view.extend({
 		o.placeholder = '/tmp/banIP-report';
 		o.rmempty = true;
 
-		o = s.taboption('advanced', form.Flag, 'ban_reportelements', _('Report Elements'), _('List Set elements in the status and report, disable this to reduce the CPU load.'));
-		o.default = 1
-		o.optional = true;
-
-		o = s.taboption('advanced', form.Flag, 'ban_fetchinsecure', _('Download Insecure'), _('Don\'t check SSL server certificates during download.'));
+		o = s.taboption('advanced', form.Value, 'ban_errordir', _('Error Directory'), _('Target directory for banIP-related error files.'));
+		o.placeholder = '/tmp/banIP-error';
 		o.rmempty = true;
 
+		o = s.taboption('advanced', form.Flag, 'ban_deduplicate', _('Deduplicate IPs'), _('Deduplicate IP addresses across all active Sets and tidy up the local blocklist.'));
+		o.default = 1;
+		o.rmempty = false;
+
 		/*
-			advanced chain/set settings tab
+			advanced chain settings tab
 		*/
 		o = s.taboption('adv_chain', form.DummyValue, '_sub');
 		o.rawhtml = true;
-		o.default = '<em><b>' + _('Changes on this tab needs a banIP service restart to take effect.') + '</b></em>';
+		o.default = '<em style="color:#37c;font-weight:bold;">' + _('Changes on this tab needs a banIP service restart to take effect.') + '</em>'
+			+ '<hr style="width: 200px; height: 1px;" />';
 
-		o = s.taboption('adv_chain', form.ListValue, 'ban_nftpolicy', _('Set Policy'), _('Set the nft policy for banIP-related sets.'));
-		o.value('memory', _('memory (default)'));
+		o = s.taboption('adv_chain', form.ListValue, 'ban_nftpriority', _('Chain Priority'), _('Set the NFT chain priority within the banIP table, lower values means higher priority.'));
+		o.value('10');
+		o.value('0');
+		o.value('-100');
+		o.value('-150');
+		o.default = '-100';
+		o.placeholder = _('-- default --');
+		o.create = true;
+		o.optional = true;
+		o.rmempty = true;
+
+		o = s.taboption('adv_chain', form.Value, 'ban_allowflag', _('Allow Protocol/Ports'), _('Always allow a protocol (tcp/udp) with certain ports or port ranges in WAN-Input and WAN-Forward chain.'));
+		o.placeholder = 'tcp 80 443-445';
+		o.rmempty = true;
+
+		o = s.taboption('adv_chain', widgets.DeviceSelect, 'ban_vlanallow', _('Allow VLAN Forwards'), _('Always allow certain VLAN forwards.'));
+		o.multiple = true;
+		o.nocreate = true;
+		o.optional = true;
+		o.rmempty = true;
+
+		o = s.taboption('adv_chain', widgets.DeviceSelect, 'ban_vlanblock', _('Block VLAN Forwards'), _('Always block certain VLAN forwards.'));
+		o.multiple = true;
+		o.nocreate = true;
+		o.optional = true;
+		o.rmempty = true;
+
+		o = s.taboption('adv_chain', form.Flag, 'ban_bcp38', _('Enable BCP38'), _('Block packets with spoofed source IP addresses in all supported chains.'));
+		o.optional = true;
+		o.rmempty = true;
+
+		o = s.taboption('adv_chain', form.ListValue, 'ban_icmplimit', _('ICMP-Threshold'), _('ICMP-Threshold in packets per second to prevent WAN-DoS attacks. To disable this safeguard set it to \'0\'.'));
+		o.value('0');
+		o.value('25');
+		o.value('50');
+		o.value('100');
+		o.value('250');
+		o.value('500');
+		o.value('1000');
+		o.default = '25';
+		o.placeholder = _('-- default --');
+		o.create = true;
+		o.optional = true;
+		o.rmempty = true;
+
+		o = s.taboption('adv_chain', form.ListValue, 'ban_synlimit', _('SYN-Threshold'), _('SYN-Threshold in packets per second to prevent WAN-DoS attacks. To disable this safeguard set it to \'0\'.'));
+		o.value('0');
+		o.value('10');
+		o.value('50');
+		o.value('100');
+		o.value('250');
+		o.value('500');
+		o.value('1000');
+		o.default = '10';
+		o.placeholder = _('-- default --');
+		o.create = true;
+		o.optional = true;
+		o.rmempty = true;
+
+		o = s.taboption('adv_chain', form.ListValue, 'ban_udplimit', _('UDP-Threshold'), _('UDP-Threshold in packets per second to prevent WAN-DoS attacks. To disable this safeguard set it to \'0\'.'));
+		o.value('0');
+		o.value('100');
+		o.value('250');
+		o.value('500');
+		o.value('1000');
+		o.value('2500');
+		o.value('5000');
+		o.default = '100';
+		o.placeholder = _('-- default --');
+		o.create = true;
+		o.optional = true;
+		o.rmempty = true;
+
+		/*
+			advanced Set settings tab
+		*/
+		o = s.taboption('adv_set', form.DummyValue, '_sub');
+		o.rawhtml = true;
+		o.default = '<em style="color:#37c;font-weight:bold;">' + _('Changes on this tab needs a banIP service restart to take effect.') + '</em>'
+			+ '<hr style="width: 200px; height: 1px;" />';
+
+		o = s.taboption('adv_set', form.ListValue, 'ban_nftpolicy', _('Set Policy'), _('Set the NFT policy for banIP-related Sets.'));
+		o.value('memory', _('memory'));
 		o.value('performance', _('performance'));
+		o.default = 'memory';
+		o.placeholder = _('-- default --');
+		o.create = true;
 		o.optional = true;
 		o.rmempty = true;
 
-		o = s.taboption('adv_chain', form.ListValue, 'ban_nftpriority', _('Chain Priority'), _('Set the nft chain priority within the banIP table. Please note: lower values means higher priority.'));
-		o.value('0', _('0'));
-		o.value('-100', _('-100'));
-		o.value('-200', _('-200 (default)'));
-		o.value('-300', _('-300'));
-		o.value('-400', _('-400'));
+		o = s.taboption('adv_set', form.ListValue, 'ban_nftretry', _('Set Load Retries'), _('Number of Set load attempts in case of an error.'));
+		o.value('1');
+		o.value('3');
+		o.value('5');
+		o.default = '3';
+		o.placeholder = _('-- default --');
+		o.create = true;
 		o.optional = true;
 		o.rmempty = true;
 
-		if (result[0]) {
-			var feed, feeds;
-			feeds = JSON.parse(result[0]);
+		o = s.taboption('adv_set', form.ListValue, 'ban_blockpolicy', _('Inbound Block Policy'), _('Drop packets silently or actively reject Inbound traffic.'));
+		o.value('drop', _('drop'));
+		o.value('reject', _('reject'));
+		o.default = 'drop';
+		o.placeholder = _('-- default --');
+		o.create = true;
+		o.optional = true;
+		o.rmempty = true;
 
-			o = s.taboption('adv_chain', form.MultiValue, 'ban_blockinput', _('WAN-Input Chain'), _('Limit certain feeds to the WAN-Input chain.'));
+		/*
+			feed parsing
+		*/
+		let feed, chain, descr;
+		let feeds = null;
+		if (result[0] && result[0].trim() !== "") {
+			try {
+				feeds = JSON.parse(result[0]);
+			} catch (e) {
+				ui.addNotification(null, E('p', _('Unable to parse the custom feed file!')), 'error');
+			}
+		}
+		if ((!L.isObject(feeds) || !Object.keys(feeds).length) && result[1] && result[1].trim() !== "") {
+			try {
+				feeds = JSON.parse(result[1]);
+			} catch (e) {
+				ui.addNotification(null, E('p', _('Unable to parse the default feed file!')), 'error');
+			}
+		}
+
+		if (feeds && Object.keys(feeds).length) {
+
+			const feedKeys = Object.keys(feeds);
+
+			o = s.taboption('adv_set', form.MultiValue, 'ban_feedin', _('Inbound Feed'), _('Override the default feed configuration and apply the feed to the inbound chain only.'));
 			o.value('allowlist', _('local allowlist'));
 			o.value('blocklist', _('local blocklist'));
-			for (var i = 0; i < Object.keys(feeds).length; i++) {
-				feed = Object.keys(feeds)[i].trim();
-				o.value(feed);
-			}
+			feedKeys.forEach(f => o.value(f.trim()));
+			o.placeholder = _('-- default --');
 			o.optional = true;
 			o.rmempty = true;
 
-			o = s.taboption('adv_chain', form.MultiValue, 'ban_blockforwardwan', _('WAN-Forward Chain'), _('Limit certain feeds to the WAN-Forward chain.'));
+			o = s.taboption('adv_set', form.MultiValue, 'ban_feedout', _('Outbound Feed'), _('Override the default feed configuration and apply the feed to the outbound chain only.'));
 			o.value('allowlist', _('local allowlist'));
 			o.value('blocklist', _('local blocklist'));
-			for (var i = 0; i < Object.keys(feeds).length; i++) {
-				feed = Object.keys(feeds)[i].trim();
-				o.value(feed);
-			}
+			feedKeys.forEach(f => o.value(f.trim()));
+			o.placeholder = _('-- default --');
 			o.optional = true;
 			o.rmempty = true;
 
-			o = s.taboption('adv_chain', form.MultiValue, 'ban_blockforwardlan', _('LAN-Forward Chain'), _('Limit certain feeds to the LAN-Forward chain.'));
+			o = s.taboption('adv_set', form.MultiValue, 'ban_feedinout', _('Inbound & Outbound Feed'), _('Override the default feed configuration and apply the feed to the inbound and outbound chain.'));
 			o.value('allowlist', _('local allowlist'));
 			o.value('blocklist', _('local blocklist'));
-			for (var i = 0; i < Object.keys(feeds).length; i++) {
-				feed = Object.keys(feeds)[i].trim();
-				o.value(feed);
-			}
+			feedKeys.forEach(f => o.value(f.trim()));
+			o.placeholder = _('-- default --');
+			o.optional = true;
+			o.rmempty = true;
+
+			o = s.taboption('adv_set', form.MultiValue, 'ban_feedreset', _('Feed Flag Reset'), _('Override the default feed configuration and remove existing port/protocol limitations.'));
+			o.value('allowlist', _('local allowlist'));
+			o.value('blocklist', _('local blocklist'));
+			feedKeys.forEach(f => o.value(f.trim()));
+			o.placeholder = _('-- default --');
+			o.optional = true;
+			o.rmempty = true;
+
+			o = s.taboption('adv_set', form.MultiValue, 'ban_feedcomplete', _('Feed Complete'), _('Opt out specific feeds from the deduplication process.'));
+			o.value('allowlist', _('local allowlist'));
+			o.value('blocklist', _('local blocklist'));
+			feedKeys.forEach(f => o.value(f.trim()));
+			o.placeholder = _('-- default --');
 			o.optional = true;
 			o.rmempty = true;
 		}
-
-		o = s.taboption('adv_chain', form.ListValue, 'ban_nftexpiry', _('Blocklist Expiry'), _('Expiry time for auto added blocklist set members.'));
-		o.value('10s');
-		o.value('1m');
-		o.value('5m');
-		o.value('1h');
-		o.value('2h');
-		o.optional = true;
-		o.rmempty = true;
 
 		/*
 			advanced log settings tab
 		*/
 		o = s.taboption('adv_log', form.DummyValue, '_sub');
 		o.rawhtml = true;
-		o.default = '<em><b>' + _('Changes on this tab needs a banIP service restart to take effect.') + '</b></em>';
+		o.default = '<em style="color:#37c;font-weight:bold;">' + _('Changes on this tab needs a banIP service restart to take effect.') + '</em>'
+			+ '<hr style="width: 200px; height: 1px;" />';
 
-		o = s.taboption('adv_log', form.ListValue, 'ban_nftloglevel', _('Log Level'), _('Set the syslog level for NFT logging.'));
+		o = s.taboption('adv_log', form.ListValue, 'ban_nftloglevel', _('NFT Log Level'), _('Set the syslog level for NFT logging.'));
 		o.value('emerg', _('emerg'));
 		o.value('alert', _('alert'));
 		o.value('crit', _('crit'));
 		o.value('err', _('err'));
-		o.value('warn', _('warn (default)'));
+		o.value('warn', _('warn'));
 		o.value('notice', _('notice'));
 		o.value('info', _('info'));
 		o.value('debug', _('debug'));
-		o.value('audit', _('audit'));
+		o.default = 'warn';
+		o.placeholder = _('-- default --');
+		o.create = true;
 		o.optional = true;
 		o.rmempty = true;
 
-		o = s.taboption('adv_log', form.ListValue, 'ban_loglimit', _('Log Limit'), _('Parse only the last stated number of log entries for suspicious events.'));
-		o.value('50', _('50'));
-		o.value('100', _('100 (default)'));
-		o.value('250', _('250'));
-		o.value('500', _('500'));
-		o.value('1000', _('1000'));
+		o = s.taboption('adv_log', form.Flag, 'ban_logprerouting', _('Log Prerouting'), _('Log suspicious packets in the Prerouting chain.'));
+		o.rmempty = false;
+
+		o = s.taboption('adv_log', form.Flag, 'ban_loginbound', _('Log Inbound'), _('Log suspicious packets in the WAN-Input and WAN-Forward chain.'));
+		o.rmempty = false;
+
+		o = s.taboption('adv_log', form.Flag, 'ban_logoutbound', _('Log Outbound'), _('Log suspicious packets in the LAN-Forward chain.'));
+		o.rmempty = false;
+
+		o = s.taboption('adv_log', form.Value, 'ban_logreadfile', _('Logfile Location'), _('Location for parsing the log file, e.g. via syslog-ng, to deactivate the standard parsing via logread.'));
+		o.placeholder = '/var/log/messages';
+		o.rmempty = true;
+
+		o = s.taboption('adv_log', form.ListValue, 'ban_loglimit', _('Log Limit'), _('Parse only the last stated number of log entries for suspicious events. To disable the log monitor at all set it to \'0\'.'));
+		o.value('0');
+		o.value('50');
+		o.value('100');
+		o.value('250');
+		o.value('500');
+		o.value('1000');
+		o.default = '100';
+		o.placeholder = _('-- default --');
+		o.create = true;
 		o.optional = true;
 		o.rmempty = true;
 
@@ -485,7 +841,64 @@ return view.extend({
 		o.datatype = 'range(1,10)';
 		o.rmempty = true;
 
-		o = s.taboption('adv_log', form.DynamicList, 'ban_logterm', _('Log Terms'), _('The default log terms / regular expressions are filtering suspicious ssh, LuCI, nginx and asterisk traffic.'));
+		o = s.taboption('adv_log', form.ListValue, 'ban_logratelimit', _('Log Rate Limit'), _('Rate (per second) for the shared NFT log limit, applied globally across all logged rules. Set to \'0\' to disable rate limiting entirely, e.g. when using ulogd or other userspace log handlers.'));
+		o.value('0');
+		o.value('1');
+		o.value('5');
+		o.value('10');
+		o.value('25');
+		o.value('50');
+		o.value('100');
+		o.default = '10';
+		o.placeholder = _('-- default --');
+		o.create = true;
+		o.optional = true;
+		o.rmempty = true;
+
+		o = s.taboption('adv_log', form.ListValue, 'ban_logburstlimit', _('Log Burst Limit'), _('Burst size in packets for the shared NFT log limit.'));
+		o.depends({ ban_logratelimit: '0', '!reverse': true });
+		o.value('1');
+		o.value('5');
+		o.value('10');
+		o.value('25');
+		o.value('50');
+		o.default = '5';
+		o.placeholder = _('-- default --');
+		o.create = true;
+		o.optional = true;
+		o.rmempty = true;
+
+		o = s.taboption('adv_log', form.DynamicList, 'ban_logterm', _('Log Terms'),
+			_('Regular expressions to detect suspicious IPs in the system log. Uses the last IP per line; prefix a term with \'first:\' for source-first formats, e.g. nginx.'));
+		o.value('Exit before auth from', _('dropbear failed login'));
+		o.value('luci: failed login', _('LuCI failed login'));
+		o.value('error: maximum authentication attempts exceeded', _('sshd failed login'));
+		o.value('sshd.*Connection closed by.*\\[preauth\\]', _('sshd closed connection'));
+		o.value('SecurityEvent=\\"InvalidAccountID\\".*RemoteAddress=', _('asterisk invalid account'));
+		o.value('TLS Error: could not determine wrapping from \\[AF_INET\\]', _('openvpn TLS error'));
+		o.value('AdGuardHome.*\\[error\\].*/control/login: from ip', _('AdGuardHome login error'));
+		o.value('received a suspicious remote IP', _('Remote logging Event'));
+		o.placeholder = _('-- Please choose (optional) --');
+		o.optional = true;
+		o.rmempty = true;
+
+		o = s.taboption('adv_log', form.Flag, 'ban_remotelog', _('Enable Remote Logging'), _('Enable the cgi interface to receive remote logging events.'));
+		o.default = 0;
+		o.optional = true;
+		o.rmempty = true;
+
+		o = s.taboption('adv_log', form.Value, 'ban_remotetoken', _('Remote Token'), _('Token to communicate with the cgi interface.'));
+		o.depends('ban_remotelog', '1');
+		o.datatype = 'and(minlength(3),maxlength(20))';
+		o.validate = function (section_id, value) {
+			if (!value) {
+				return _('Empty field not allowed');
+			}
+			if (!value.match(/^[A-Za-z0-9.:]+$/)) {
+				return _('Invalid characters');
+			}
+			return true;
+		};
 		o.optional = true;
 		o.rmempty = true;
 
@@ -494,7 +907,8 @@ return view.extend({
 		*/
 		o = s.taboption('adv_email', form.DummyValue, '_sub');
 		o.rawhtml = true;
-		o.default = '<em><b>' + _('To enable email notifications, set up the \'msmtp\' package and specify a vaild E-Mail receiver address.') + '</b></em>';
+		o.default = '<em style="color:#37c;font-weight:bold;">' + _('To enable email notifications, set up the \'msmtp\' package and specify a valid E-Mail receiver address.') + '</em>'
+			+ '<hr style="width: 200px; height: 1px;" />';
 
 		o = s.taboption('adv_email', form.Flag, 'ban_mailnotification', _('E-Mail Notification'), _('Receive E-Mail notifications with every banIP run.'));
 		o.rmempty = true;
@@ -517,60 +931,210 @@ return view.extend({
 		o.rmempty = true;
 
 		/*
-			blocklist feeds tab
+			feeds tab
 		*/
 		o = s.taboption('feeds', form.DummyValue, '_sub');
 		o.rawhtml = true;
-		o.default = '<em><b>' + _('List of supported and fully pre-configured banIP feeds.') + '</b></em>';
+		o.default = '<em style="color:#37c;font-weight:bold;">' + _('Changes on this tab needs a banIP service reload to take effect.') + '</em>'
+			+ '<hr style="width: 200px; height: 1px;" />'
+			+ '<em style="color:#37c;font-weight:bold;">' + _('External Blocklist Feeds') + '</em>';
 
-		if (result[0]) {
-			var focus, feed, feeds;
-			feeds = JSON.parse(result[0]);
-
-			o = s.taboption('feeds', form.MultiValue, 'ban_feed', _('Feed Selection'));
-			for (var i = 0; i < Object.keys(feeds).length; i++) {
-				feed = Object.keys(feeds)[i].trim();
-				focus = feeds[feed].focus.trim();
-				o.value(feed, feed + ' (' + focus + ')');
+		if (feeds && Object.keys(feeds).length) {
+			o = s.taboption('feeds', form.MultiValue, 'ban_feed', _('Blocklist Feed'));
+			for (let i = 0; i < Object.keys(feeds).length; i++) {
+				feed = (Object.keys(feeds)[i] || '').trim();
+				chain = (feeds[feed]?.chain || 'in').trim();
+				descr = (feeds[feed]?.descr || '-').trim();
+				o.value(feed, feed + ' (' + chain + ', ' + descr + ')');
 			}
+			o.placeholder = _('-- Please choose (optional) --');
 			o.optional = true;
 			o.rmempty = true;
 		}
 
-		/*
-			prepare country data
-		*/
-		var code, country, countries = [];
-		if (result[1]) {
-			countries = result[1].trim().split('\n');
-
-			o = s.taboption('feeds', form.MultiValue, 'ban_country', _('Countries'));
-			for (var i = 0; i < countries.length; i++) {
-				code = countries[i].match(/^(\w+);/)[1].trim();
-				country = countries[i].match(/^\w+;(.*$)/)[1].trim();
-				o.value(code, country);
+		o = s.taboption('feeds', form.Value, 'ban_authkey', _('Feed Auth-Key'), _('Personal auth-key for feeds with an \'{authkey}\' URL placeholder, e.g. the free abuse.ch key required by the \'urlhaus\' feed.'));
+		o.password = true;
+		o.validate = function (section_id, value) {
+			if (value && !value.match(/^[A-Za-z0-9_-]+$/)) {
+				return _('Invalid characters');
 			}
-			o.optional = true;
-			o.rmempty = true;
+			return true;
+		};
+		o.optional = true;
+		o.rmempty = true;
+
+		o = s.taboption('feeds', form.DummyValue, '_feeds1');
+		o.rawhtml = true;
+		o.default = '<hr style="width: 200px; height: 1px;" /><em style="color:#37c;font-weight:bold;">' + _('Country Selection') + '</em>';
+
+		let err, ccode, rir, country, countries = [];
+		if (result[2] && result[2].trim() !== "") {
+			countries = result[2].trim().split('\n');
+			if (countries && countries.length) {
+				o = s.taboption('feeds', form.MultiValue, 'ban_country', _('Countries') + ' (<abbr title="Regional Internet Registries">RIR</abbr>)');
+				for (let i = 0; i < countries.length; i++) {
+					try {
+						ccode = countries[i].match(/^(\w+)\t/)[1].trim();
+						rir = countries[i].match(/^\w+\t(\w+)\t/)[1].trim();
+						country = countries[i].match(/^\w+\t\w+\t(.*$)/)[1].trim();
+						o.value(ccode, country + ' (' + rir + ')');
+					} catch (e) {
+						countries[i] = "";
+						if (!err) {
+							ui.addNotification(null, E('p', _('Unable to parse the countries file!')), 'error');
+						}
+						err = e;
+					}
+				}
+				o.placeholder = _('-- Please choose (optional) --');
+				o.optional = true;
+				o.rmempty = true;
+			}
 		}
 
-		o = s.taboption('feeds', form.DynamicList, 'ban_asn', _('ASNs'));
+		o = s.taboption('feeds', form.MultiValue, 'ban_region', _('Regional Internet Registry'), _('Summary of countries based on the Regional Internet Registry (RIR).'));
+		o.value('AFRINIC', _('AFRINIC - serving Africa and the Indian Ocean region'));
+		o.value('APNIC', _('APNIC - serving the Asia Pacific region'));
+		o.value('ARIN', _('ARIN - serving Canada and the United States'));
+		o.value('LACNIC', _('LACNIC - serving the Latin American and Caribbean region'));
+		o.value('RIPE', _('RIPE - serving Europe, Middle East and Central Asia'));
+		o.placeholder = _('-- Please choose (optional) --');
+		o.optional = true;
+		o.rmempty = true;
+
+		o = s.taboption('feeds', form.Flag, 'ban_countrysplit', _('Split Country Set'), _('The selected Countries are stored in separate Sets.'));
+		o.rmempty = true;
+
+		o = s.taboption('feeds', form.DummyValue, '_feeds2');
+		o.rawhtml = true;
+		o.default = '<hr style="width: 200px; height: 1px;" /><em style="color:#37c;font-weight:bold;">' + _('ASN Selection') + '</em>';
+
+		o = s.taboption('feeds', form.DynamicList, 'ban_asn', _('ASNs'), _('Collection of IP addresses based on Autonomous System Numbers.'));
 		o.datatype = 'uinteger';
 		o.optional = true;
 		o.rmempty = true;
 
-		o = s.taboption('feeds', form.Flag, 'ban_autoallowlist', _('Auto Allowlist'), _('Automatically transfers uplink IPs to the banIP allowlist.'));
-		o.default = 1
+		o = s.taboption('feeds', form.Flag, 'ban_asnsplit', _('Split ASN Set'), _('The selected ASNs are stored in separate Sets.'));
+		o.rmempty = true;
+
+		o = s.taboption('feeds', form.DummyValue, '_feeds3');
+		o.rawhtml = true;
+		o.default = '<hr style="width: 200px; height: 1px;" /><em style="color:#37c;font-weight:bold;">' + _('External Allowlist Feeds') + '</em>';
+
+		if (countries && countries.length) {
+			o = s.taboption('feeds', form.DynamicList, 'ban_allowurl', _('Allowlist Feed URLs'));
+			for (let i = 0; i < countries.length; i++) {
+				try {
+					ccode = countries[i].match(/^(\w+)\t/)[1].trim();
+					rir = countries[i].match(/^\w+\t(\w+)\t/)[1].trim();
+					country = countries[i].match(/^\w+\t\w+\t(.*$)/)[1].trim();
+					o.value('https://www.ipdeny.com/ipblocks/data/aggregated/' + ccode + '-aggregated.zone', country + ' IPv4 (' + rir + ')');
+					o.value('https://www.ipdeny.com/ipv6/ipaddresses/aggregated/' + ccode + '-aggregated.zone', country + ' IPv6 (' + rir + ')');
+				} catch (e) {
+					countries[i] = "";
+				}
+			}
+			o.placeholder = _('-- Please choose (optional) --');
+			o.optional = true;
+			o.rmempty = true;
+			o.validate = function (section_id, value) {
+				if (!value) {
+					return true;
+				}
+				if (!value.match(/^(https?:\/\/)[A-Za-z0-9-]+\.[A-Za-z0-9.-]+(:[0-9]+)?(\/[A-Za-z0-9._\-?&+=:~#%]*)?$/)) {
+					return _('Invalid URL format');
+				}
+				return true;
+			};
+		}
+
+		o = s.taboption('feeds', form.DummyValue, '_feeds4');
+		o.rawhtml = true;
+		o.default = '<hr style="width: 200px; height: 1px;" /><em style="color:#37c;font-weight:bold;">' + _('Local Feed Settings') + '</em>';
+
+		o = s.taboption('feeds', form.Flag, 'ban_autoallowlist', _('Auto Allowlist'), _('Automatically add resolved domains and uplink IPs to the local banIP allowlist.'));
+		o.default = 1;
 		o.rmempty = false;
 
-		o = s.taboption('feeds', form.Flag, 'ban_autoblocklist', _('Auto Blocklist'), _('Automatically transfers suspicious IPs to the banIP blocklist.'));
-		o.default = 1
+		o = s.taboption('feeds', form.ListValue, 'ban_autoallowuplink', _('Auto Allow Uplink'), _('Limit the uplink autoallow function.'));
+		o.depends('ban_autoallowlist', '1');
+		o.value('disable', _('Disable'));
+		o.value('subnet', _('Subnet'));
+		o.value('ip', _('IP'));
+		o.default = 'subnet';
+		o.placeholder = _('-- default --');
+		o.create = true;
+		o.optional = true;
+		o.rmempty = true;
+
+		o = s.taboption('feeds', form.Flag, 'ban_autoblocklist', _('Auto Blocklist'), _('Automatically add resolved domains and suspicious IPs to the local banIP blocklist.'));
+		o.default = 1;
 		o.rmempty = false;
+
+		o = s.taboption('feeds', form.Flag, 'ban_autoblocksubnet', _('Auto Block Subnet'), _('Automatically add entire subnets to the blocklist Set based on an additional RDAP request with the suspicious IP.'));
+		o.default = 0;
+		o.optional = true;
+		o.rmempty = true;
+
+		o = s.taboption('feeds', form.Value, 'ban_nftexpiry', _('Blocklist Set Expiry'), _('Expiry time for auto added blocklist Set members.'));
+		o.value('30ms');
+		o.value('10s');
+		o.value('1m');
+		o.value('5m');
+		o.value('1h');
+		o.value('2h');
+		o.value('1d');
+		o.value('7d');
+		o.value('14d');
+		o.placeholder = _('-- default --');
+		o.optional = true;
+		o.rmempty = true;
+		o.validate = function (section_id, value) {
+			if (!value) {
+				return true;
+			}
+			if (!value.match(/^([1-9][0-9]*(ms|s|m|h|d))+$/)) {
+				return _('Invalid expiry format, e.g. 5m, 2h, 1d or 1h30m');
+			}
+			return true;
+		};
 
 		o = s.taboption('feeds', form.Flag, 'ban_allowlistonly', _('Allowlist Only'), _('Restrict the internet access from/to a small number of secure IPs.'));
 		o.rmempty = false;
 
+		o = s.taboption('feeds', form.Flag, 'ban_monitorallowed', _('Monitor Local Allowlist'), _('The log monitor only honours the entries of the local allowlist, IPs which are merely covered by an external allowlist feed can be blocked.'));
+		o.depends('ban_allowlistonly', '1');
+		o.rmempty = false;
+
+		s = m.section(form.NamedSection, 'global');
+		s.render = L.bind(function () {
+			return E('div', { 'class': 'cbi-page-actions' }, [
+				E('button', {
+					'class': 'btn cbi-button cbi-button-negative important',
+					'style': 'float:none;margin-right:.4em;',
+					'click': ui.createHandlerFn(this, function () {
+						return handleAction('stop');
+					})
+				}, [_('Stop')]),
+				E('button', {
+					'class': 'btn cbi-button cbi-button-positive important',
+					'style': 'float:none;margin-right:.4em;',
+					'click': ui.createHandlerFn(this, function () {
+						return handleAction('reload');
+					})
+				}, [_('Save & Reload')]),
+				E('button', {
+					'class': 'btn cbi-button cbi-button-positive important',
+					'style': 'float:none',
+					'click': ui.createHandlerFn(this, function () {
+						return handleAction('restart');
+					})
+				}, [_('Save & Restart')])
+			]);
+		});
 		return m.render();
 	},
+	handleSaveApply: null,
+	handleSave: null,
 	handleReset: null
 });

@@ -1,7 +1,7 @@
 // Copyright 2022 Jo-Philipp Wich <jo@mein.io>
 // Licensed to the public under the Apache License 2.0.
 
-import { access, basename } from 'fs';
+import { access, basename, stat } from 'fs';
 import { cursor } from 'uci';
 
 const template_directory = '/usr/share/ucode/luci/template';
@@ -173,12 +173,13 @@ export default function(env) {
 		}
 
 		if (!media)
-			error500(`Unable to render any theme header template, last error was:\n${status}`);
+			env.dispatcher.error500(`Unable to render any theme header template, last error was:\n${status}`);
 	}
 
 	self.env.media = media;
 	self.env.theme = basename(media);
 	self.env.resource = uci.get('luci', 'main', 'resourcebase');
+	self.env.pkgs_update_time = stat('/lib/apk/db/installed')?.mtime ?? stat('/usr/lib/opkg/status')?.mtime ?? 0;
 	self.env.include = (...args) => self.render_any(...args);
 
 	return self;
